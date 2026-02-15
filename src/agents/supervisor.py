@@ -3,7 +3,6 @@ Supervisor Agent — orchestrates Data Engineer, Data Scientist, and Visualizer.
 Uses the "Agents as Tools" pattern: each sub-agent is wrapped with @tool.
 """
 
-import json
 import os
 
 from strands import Agent, tool
@@ -11,84 +10,28 @@ from strands import Agent, tool
 from src.agents.data_engineer import create_data_engineer_agent
 from src.agents.data_scientist import create_data_scientist_agent
 from src.agents.visualizer import create_visualizer_agent
-from src.config import DATA_DIR, MODEL_ID, OUTPUT_DIR, S3_BUCKET, S3_ENABLED, S3_PREFIX
+from src.config import MODEL_ID
 
 SYSTEM_PROMPT = """You are a Supervisor agent that coordinates data exploration tasks. You have three specialist agents available as tools:
 
-1. data_engineer — Call this for data cleaning, profiling, handling missing values, and data quality checks.
-2. data_scientist — Call this for training ML models, feature engineering, and statistical analysis. This agent can execute Python code.
-3. visualizer — Call this for creating charts, plots, and visual summaries of data. This agent can execute Python code.
+1. data_engineer — Call this for data cleaning, profiling, handling missing values, and data quality checks. This agent works with local CSV files.
+2. data_scientist — Call this for training ML models, feature engineering, and statistical analysis. This agent executes Python code in a cloud sandbox.
+3. visualizer — Call this for creating charts, plots, and visual summaries of data. This agent executes Python code in a cloud sandbox.
 
-When the user asks a question:
-1. Analyze what type of work is needed
-2. Call the appropriate specialist(s) in the right order
-3. Synthesize their responses into a clear final answer
+IMPORTANT WORKFLOW RULES:
+- Always start with data_engineer to profile/clean data first.
+- The data_scientist and visualizer agents run in sandboxed cloud environments and CANNOT access local files.
+- When calling data_scientist or visualizer, you MUST include the actual data (CSV text or summary stats) in the task description so they can work with it.
+- After data_engineer profiles or cleans data, extract the key information and pass it along to the next agent.
 
-Always start with data_engineer if the data hasn't been profiled yet. Pass relevant context between agents."""
+Example workflow for "analyze and predict house values":
+1. Call data_engineer to profile data/housing.csv → get stats and missing value report
+2. Call data_engineer to clean data → saves data/housing_clean.csv
+3. Read the cleaning report, then call data_scientist with the data description and ask it to train a model
+4. Call visualizer with data summary to create relevant charts
 
-S3_PROMPT_ADDITION = """
+Always synthesize the final answer clearly, combining insights from all agents."""
 
-You also have S3 integration enabled. The S3 bucket is "{bucket}" with prefix "{prefix}".
-- Use s3_download, s3_upload, s3_list tools for direct S3 operations.
-- Data from S3 is automatically downloaded to data/ before agents run.
-- Outputs from data_scientist and visualizer are automatically uploaded to S3 after they finish.
-- The data_engineer agent also has direct S3 access via its own s3_download/s3_upload/s3_list tools.
-"""
-
-
-# ---------------------------------------------------------------------------
-# S3 bridge helpers
-# ---------------------------------------------------------------------------
-
-def _s3_key(relative_path: str) -> str:
-    """Build a full S3 key from a path relative to the project."""
-    if S3_PREFIX:
-        return f"{S3_PREFIX}/{relative_path}".replace("//", "/")
-    return relative_path
-
-
-def _ensure_data_local() -> None:
-    """Download data files from S3 to DATA_DIR if they aren't already present."""
-    if not S3_ENABLED:
-        return
-
-    from src.utils.s3 import download_from_s3
-
-    import boto3
-    client = boto3.client("s3")
-    prefix = _s3_key("data/")
-    paginator = client.get_paginator("list_objects_v2")
-
-    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            s3_key = obj["Key"]
-            # Derive local path: strip the S3_PREFIX to get relative path
-            relative = s3_key
-            if S3_PREFIX and relative.startswith(S3_PREFIX + "/"):
-                relative = relative[len(S3_PREFIX) + 1:]
-            local_path = os.path.join(relative)  # e.g. "data/housing.csv"
-            if not os.path.exists(local_path):
-                print(f"  [S3] Downloading s3://{S3_BUCKET}/{s3_key} → {local_path}")
-                download_from_s3(s3_key, local_path)
-
-
-def _upload_outputs_to_s3() -> list[str]:
-    """Upload all files in OUTPUT_DIR to S3. Returns list of uploaded keys."""
-    if not S3_ENABLED:
-        return []
-
-    from src.utils.s3 import upload_directory_to_s3
-
-    s3_prefix = _s3_key("output/")
-    uploaded = upload_directory_to_s3(OUTPUT_DIR, s3_prefix)
-    for key in uploaded:
-        print(f"  [S3] Uploaded → s3://{S3_BUCKET}/{key}")
-    return uploaded
-
-
-# ---------------------------------------------------------------------------
-# Agent factory
-# ---------------------------------------------------------------------------
 
 def create_supervisor_agent() -> Agent:
     """
@@ -102,16 +45,16 @@ def create_supervisor_agent() -> Agent:
         """
         Delegate a data engineering task to the Data Engineer specialist agent.
         Use this for profiling datasets, checking missing values, cleaning data,
-        and saving cleaned CSVs.
+        and saving cleaned CSVs. This agent has direct access to local CSV files.
 
         Args:
             task: A natural-language description of the data engineering task.
+                  Include the file path (e.g., 'data/housing.csv').
 
         Returns:
             The Data Engineer agent's response as a string.
         """
         try:
-            _ensure_data_local()
             agent = create_data_engineer_agent()
             result = agent(task)
             return str(result)
@@ -122,24 +65,21 @@ def create_supervisor_agent() -> Agent:
     def data_scientist(task: str) -> str:
         """
         Delegate a data science task to the Data Scientist specialist agent.
-        Use this for EDA, feature engineering, ML model training (regression,
-        classification), and reporting metrics.
+        This agent runs code in a sandboxed cloud Code Interpreter.
+        It CANNOT access local files — you must include data in the task description.
 
         Args:
             task: A natural-language description of the data science task.
+                  MUST include the actual data (CSV text or summary) since
+                  the agent cannot access local files.
 
         Returns:
             The Data Scientist agent's response as a string.
         """
         try:
-            _ensure_data_local()
             agent = create_data_scientist_agent()
             result = agent(task)
-            response = str(result)
-            uploaded = _upload_outputs_to_s3()
-            if uploaded:
-                response += f"\n\n[S3] Uploaded {len(uploaded)} file(s): {json.dumps(uploaded)}"
-            return response
+            return str(result)
         except Exception as exc:
             return f"[Data Scientist error] {exc}"
 
@@ -147,38 +87,26 @@ def create_supervisor_agent() -> Agent:
     def visualizer(task: str) -> str:
         """
         Delegate a visualization task to the Visualization specialist agent.
-        Use this for creating charts, plots, heatmaps, and other visual
-        summaries. Plots are saved to the output/ directory.
+        This agent runs code in a sandboxed cloud Code Interpreter.
+        It CANNOT access local files — you must include data in the task description.
 
         Args:
             task: A natural-language description of the visualization task.
+                  MUST include the actual data (CSV text or summary) since
+                  the agent cannot access local files.
 
         Returns:
             The Visualizer agent's response as a string.
         """
         try:
-            _ensure_data_local()
             agent = create_visualizer_agent()
             result = agent(task)
-            response = str(result)
-            uploaded = _upload_outputs_to_s3()
-            if uploaded:
-                response += f"\n\n[S3] Uploaded {len(uploaded)} file(s): {json.dumps(uploaded)}"
-            return response
+            return str(result)
         except Exception as exc:
             return f"[Visualizer error] {exc}"
 
-    tools = [data_engineer, data_scientist, visualizer]
-    system_prompt = SYSTEM_PROMPT
-
-    if S3_ENABLED:
-        from src.utils.s3 import s3_download, s3_list, s3_upload
-
-        tools.extend([s3_download, s3_upload, s3_list])
-        system_prompt += S3_PROMPT_ADDITION.format(bucket=S3_BUCKET, prefix=S3_PREFIX)
-
     return Agent(
         model=MODEL_ID,
-        system_prompt=system_prompt,
-        tools=tools,
+        system_prompt=SYSTEM_PROMPT,
+        tools=[data_engineer, data_scientist, visualizer],
     )
