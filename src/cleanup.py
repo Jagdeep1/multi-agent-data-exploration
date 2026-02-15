@@ -5,8 +5,9 @@ Clean up all deployed AgentCore resources.
 Deletes:
 - AgentCore Runtime
 - ECR repository
-- Code Interpreter instances
-- IAM roles (optional, with --all flag)
+- Cognito User Pool (with --all flag)
+- Code Interpreter instances (with --all flag)
+- IAM roles (with --all flag)
 
 Usage:
     export AWS_PROFILE=claude
@@ -53,6 +54,21 @@ def delete_ecr():
         print(f"   ✅ Deleted ECR repository: {AGENT_NAME}")
     except Exception as e:
         print(f"   ⚠️  Could not delete ECR repo: {e}")
+
+
+def delete_cognito():
+    """Delete the Cognito User Pool."""
+    pool_id = os.getenv("COGNITO_POOL_ID")
+    if not pool_id:
+        print("   ⚠️  COGNITO_POOL_ID not found in .env, skipping")
+        return
+
+    try:
+        client = boto3.client("cognito-idp", region_name=AWS_REGION)
+        client.delete_user_pool(UserPoolId=pool_id)
+        print(f"   ✅ Deleted Cognito User Pool: {pool_id}")
+    except Exception as e:
+        print(f"   ⚠️  Could not delete Cognito pool: {e}")
 
 
 def delete_code_interpreters():
@@ -104,6 +120,9 @@ def main():
     delete_ecr()
 
     if args.all:
+        print("\n🔑 Deleting Cognito User Pool...")
+        delete_cognito()
+
         print("\n💻 Deleting Code Interpreters...")
         delete_code_interpreters()
 

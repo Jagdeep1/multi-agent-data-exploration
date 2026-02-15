@@ -5,8 +5,9 @@ Deploy the multi-agent MCP server to Amazon Bedrock AgentCore Runtime.
 Prerequisites:
     1. Docker must be running
     2. Run deploy_iam_role.py first (creates execution role)
-    3. Run deploy_code_interpreter.py first (creates Code Interpreter instances)
-    4. Run src.utils.dataset to generate sample data
+    3. Run deploy_cognito.py first (creates Cognito user pool for auth)
+    4. Run deploy_code_interpreter.py first (creates Code Interpreter instances)
+    5. Run src.utils.dataset to generate sample data
 
 Usage:
     export AWS_PROFILE=claude
@@ -42,6 +43,12 @@ def check_prerequisites():
     role_arn = os.getenv("EXECUTION_ROLE_ARN")
     if not role_arn:
         errors.append("EXECUTION_ROLE_ARN not set in .env. Run: python -m src.deploy_iam_role")
+
+    # Check Cognito config
+    cognito_client_id = os.getenv("COGNITO_CLIENT_ID")
+    cognito_discovery_url = os.getenv("COGNITO_DISCOVERY_URL")
+    if not cognito_client_id or not cognito_discovery_url:
+        errors.append("Cognito config not set in .env. Run: python -m src.deploy_cognito")
 
     # Check Code Interpreter IDs
     ds_id = os.getenv("DATASCIENTIST_CODE_INTERPRETER_ID")
@@ -83,13 +90,26 @@ def deploy():
         print("   Run: pip install bedrock-agentcore-starter-toolkit")
         sys.exit(1)
 
+    # Load Cognito config for auth
+    cognito_client_id = os.getenv("COGNITO_CLIENT_ID")
+    cognito_discovery_url = os.getenv("COGNITO_DISCOVERY_URL")
+
     print(f"\n🚀 Deploying '{AGENT_NAME}' to AgentCore Runtime")
-    print(f"   Region: {AWS_REGION}")
-    print(f"   Role: {role_arn}")
+    print(f"   Region:   {AWS_REGION}")
+    print(f"   Role:     {role_arn}")
     print(f"   Protocol: MCP")
+    print(f"   Auth:     Cognito JWT (client: {cognito_client_id})")
     print()
 
     runtime = Runtime()
+
+    # Build auth config for customJWTAuthorizer
+    auth_config = {
+        "customJWTAuthorizer": {
+            "allowedClients": [cognito_client_id],
+            "discoveryUrl": cognito_discovery_url,
+        }
+    }
 
     # Step 1: Configure
     print("📦 Step 1/3: Configuring deployment...")
@@ -100,6 +120,7 @@ def deploy():
         auto_create_ecr=True,
         requirements_file="requirements.txt",
         region=AWS_REGION,
+        authorizer_configuration=auth_config,
         protocol="MCP",
         agent_name=AGENT_NAME,
     )
